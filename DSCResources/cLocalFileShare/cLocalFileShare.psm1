@@ -1,71 +1,222 @@
 ﻿<#
 Author  : Serge Nikalaichyk (https://www.linkedin.com/in/nikalaichyk)
-Version : 1.0.0
-Date    : 2015-10-05
+Version : 1.0.1
+Date    : 2015-10-15
 #>
 
 
 function Get-TargetResource
 {
     [CmdletBinding()]
-    [OutputType([System.Collections.Hashtable])]
+    [OutputType([Hashtable])]
     param
     (
         [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
-        [System.String]
+        [String]
         $Name,
 
         [Parameter(Mandatory = $true)]
         [ValidateScript({Test-Path -Path $_ -PathType Container})]
-        [System.String]
+        [String]
         $Path
     )
-    process
+
+    if ($Path.EndsWith('\'))
     {
-        if ($Path.EndsWith('\'))
+        $Path = $Path.TrimEnd('\')
+    }
+
+    $Share = Get-WmiObject -Class Win32_Share -Filter "Name = '$Name' AND Type = 0"
+
+    if ($Share)
+    {
+        if ($Share.Path -eq $Path)
         {
-            $Path = $Path.TrimEnd('\')
-        }
+            Write-Verbose -Message  "File share '$Name' with path '$Path' was found."
 
-        $Share = Get-WmiObject -Class Win32_Share -Filter "Name = '$Name' AND Type = 0"
+            $EnsureResult = 'Present'
 
-        if ($Share)
-        {
-            if ($Share.Path -eq $Path)
-            {
-                Write-Verbose -Message  "File share '$Name' with path '$Path' was found."
-
-                $EnsureResult = 'Present'
-
-                $ShareAccessSplit = Get-FileShareAccess -Name $Name | ConvertFrom-FileShareAccess
-            }
-            else
-            {
-                throw "File share '$Name' already exists and is targeting to path '$($Share.Path)'."
-            }
+            $ShareAccessSplit = Get-cLocalFileShareAccess -Name $Name | ConvertFrom-cLocalFileShareAccess
         }
         else
         {
-            Write-Verbose -Message  "File share '$Name' with path '$Path' could not be found."
+            throw "File share '$Name' already exists and is targeting to path '$($Share.Path)'."
+        }
+    }
+    else
+    {
+        Write-Verbose -Message  "File share '$Name' with path '$Path' could not be found."
 
-            $EnsureResult = 'Absent'
-        } 
+        $EnsureResult = 'Absent'
+    }
 
-        $ReturnValue = @{
+    $ReturnValue = @{
             Ensure = $EnsureResult
             Name = $Name
             Path = $Path
-            ConcurrentUserLimit = [System.UInt32]$Share.MaximumAllowed
+            ConcurrentUserLimit = [UInt32]$Share.MaximumAllowed
             Description = $Share.Description
-            FullAccess = $ShareAccessSplit.FullAccess
-            ChangeAccess = $ShareAccessSplit.ChangeAccess
-            ReadAccess = $ShareAccessSplit.ReadAccess
-            NoAccess = $ShareAccessSplit.NoAccess
+            FullAccess = [String[]]@($ShareAccessSplit.FullAccess)
+            ChangeAccess = [String[]]@($ShareAccessSplit.ChangeAccess)
+            ReadAccess = [String[]]@($ShareAccessSplit.ReadAccess)
+            NoAccess = [String[]]@($ShareAccessSplit.NoAccess)
         }
 
-        return $ReturnValue
+    return $ReturnValue
+
+}
+
+
+function Test-TargetResource
+{
+    [CmdletBinding()]
+    [OutputType([Boolean])]
+    param
+    (
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('Absent', 'Present')]
+        [String]
+        $Ensure = 'Present',
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Name,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateScript({Test-Path -Path $_ -PathType Container})]
+        [String]
+        $Path,
+
+        [Parameter(Mandatory = $false)]
+        [UInt32]
+        $ConcurrentUserLimit,
+
+        [Parameter(Mandatory = $false)]
+        [String]
+        $Description,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateNotNullOrEmpty()]
+        [String[]]
+        $FullAccess,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateNotNullOrEmpty()]
+        [String[]]
+        $ChangeAccess,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateNotNullOrEmpty()]
+        [String[]]
+        $ReadAccess,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateNotNullOrEmpty()]
+        [String[]]
+        $NoAccess
+    )
+
+    if ($Path.EndsWith('\'))
+    {
+        $Path = $Path.TrimEnd('\')
     }
+
+    $TargetResource = Get-TargetResource -Name $Name -Path $Path
+
+    if ($Ensure -eq 'Absent')
+    {
+        if ($TargetResource.Ensure -eq 'Absent')
+        {
+            $InDesiredState = $true
+        }
+        else
+        {
+            $InDesiredState = $false
+        }
+    }
+    elseif ($Ensure -eq 'Present')
+    {
+        if ($TargetResource.Ensure -eq 'Absent')
+        {
+            $InDesiredState = $false
+        }
+        else
+        {
+            $InDesiredState = $true
+
+            $PSBoundParameters.Keys.Where({$_ -in @('Name', 'Path', 'ConcurrentUserLimit', 'Description', 'Ensure')}).ForEach(
+                {
+                    if (Compare-Object -ReferenceObject $PSBoundParameters.Item($_) -DifferenceObject $TargetResource.Item($_))
+                    {
+                        "Property '{0}': Current value: '{1}'; Desired value: '{2}'." -f
+                            $_, ($TargetResource.Item($_) -join ', '), ($PSBoundParameters.Item($_) -join ', ') |
+                        Write-Verbose
+
+                        $InDesiredState = $false
+                    }
+                }
+            )
+
+            # Normalize and test access-related property values
+            if ($PSBoundParameters.Keys.Where({$_ -in @('FullAccess', 'ChangeAccess', 'ReadAccess', 'NoAccess')}))
+            {
+                Write-Verbose -Message "Testing access-related property values."
+
+                $ReferenceAccessSplit = ConvertTo-cLocalFileShareAccess -FullAccess $FullAccess -ChangeAccess $ChangeAccess -ReadAccess $ReadAccess -NoAccess $NoAccess |
+                    ConvertFrom-cLocalFileShareAccess
+
+                if (Compare-Object -ReferenceObject $ReferenceAccessSplit.FullAccess -DifferenceObject $TargetResource.FullAccess)
+                {
+                    "Property '{0}': Current value: '{1}'; Desired value: '{2}'." -f
+                        'FullAccess', ($TargetResource.FullAccess -join ', '), ($ReferenceAccessSplit.FullAccess -join ', ') |
+                    Write-Verbose
+
+                    $InDesiredState = $false
+                }
+
+                if (Compare-Object -ReferenceObject $ReferenceAccessSplit.ChangeAccess -DifferenceObject $TargetResource.ChangeAccess)
+                {
+                    "Property '{0}': Current value: '{1}'; Desired value: '{2}'." -f
+                        'ChangeAccess', ($TargetResource.ChangeAccess -join ', '), ($ReferenceAccessSplit.ChangeAccess -join ', ') |
+                    Write-Verbose
+
+                    $InDesiredState = $false
+                }
+
+                if (Compare-Object -ReferenceObject $ReferenceAccessSplit.ReadAccess -DifferenceObject $TargetResource.ReadAccess)
+                {
+                    "Property '{0}': Current value: '{1}'; Desired value: '{2}'." -f
+                        'ReadAccess', ($TargetResource.ReadAccess -join ', '), ($ReferenceAccessSplit.ReadAccess -join ', ') |
+                    Write-Verbose
+
+                    $InDesiredState = $false
+                }
+
+                if (Compare-Object -ReferenceObject $ReferenceAccessSplit.NoAccess -DifferenceObject $TargetResource.NoAccess)
+                {
+                    "Property '{0}': Current value: '{1}'; Desired value: '{2}'." -f
+                        'NoAccess', ($TargetResource.NoAccess -join ', ') , ($ReferenceAccessSplit.NoAccess -join ', ') |
+                    Write-Verbose
+
+                    $InDesiredState = $false
+                }
+            }
+        }
+    }
+
+    if ($InDesiredState -eq $true)
+    {
+        Write-Verbose -Message "The target resource is already in the desired state. No action is required."
+    }
+    else
+    {
+        Write-Verbose -Message "The target resource is not in the desired state."
+    }
+
+    return $InDesiredState
+
 }
 
 
@@ -76,268 +227,114 @@ function Set-TargetResource
     (
         [Parameter(Mandatory = $false)]
         [ValidateSet('Absent', 'Present')]
-        [System.String]
+        [String]
         $Ensure = 'Present',
 
         [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
-        [System.String]
+        [String]
         $Name,
 
         [Parameter(Mandatory = $true)]
         [ValidateScript({Test-Path -Path $_ -PathType Container})]
-        [System.String]
+        [String]
         $Path,
 
         [Parameter(Mandatory = $false)]
-        [System.UInt32]
+        [UInt32]
         $ConcurrentUserLimit,
 
         [Parameter(Mandatory = $false)]
-        [System.String]
+        [String]
         $Description,
 
         [Parameter(Mandatory = $false)]
         [ValidateNotNullOrEmpty()]
-        [System.String[]]
+        [String[]]
         $FullAccess,
 
         [Parameter(Mandatory = $false)]
         [ValidateNotNullOrEmpty()]
-        [System.String[]]
+        [String[]]
         $ChangeAccess,
 
         [Parameter(Mandatory = $false)]
         [ValidateNotNullOrEmpty()]
-        [System.String[]]
+        [String[]]
         $ReadAccess,
 
         [Parameter(Mandatory = $false)]
         [ValidateNotNullOrEmpty()]
-        [System.String[]]
+        [String[]]
         $NoAccess
     )
-    process
+
+    if (-not $PSCmdlet.ShouldProcess($Name))
     {
-        if (-not $PSCmdlet.ShouldProcess($Name))
+        return
+    }
+
+    if ($Path.EndsWith('\'))
+    {
+        $Path = $Path.TrimEnd('\')
+    }
+
+    $TargetResource = Get-TargetResource -Name $Name -Path $Path
+
+    if ($Ensure -eq 'Absent')
+    {
+        if ($TargetResource.Ensure -eq 'Present')
         {
-            return
-        }
+            Write-Verbose -Message  "Removing file share '$Name'."
 
-        if ($Path.EndsWith('\'))
-        {
-            $Path = $Path.TrimEnd('\')
-        }
-
-        $TargetResource = Get-TargetResource -Name $Name -Path $Path
-
-        if ($Ensure -eq 'Absent')
-        {
-            if ($TargetResource.Ensure -eq 'Present')
-            {
-                Write-Verbose -Message  "Removing file share '$Name'."
-
-                Remove-FileShare -Name $Name -Confirm:$false
-            }
-        }
-        elseif ($Ensure -eq 'Present')
-        {
-            if ($TargetResource.Ensure -eq 'Absent')
-            {
-                Write-Verbose -Message  "Creating file share '$Name' with path '$Path'."
-
-                New-FileShare -Name $Name -Path $Path -ErrorAction Stop
-
-                $TargetResource = Get-TargetResource -Name $Name -Path $Path
-            }
-
-            # Compare permissions
-            $ReferenceAccess = ConvertTo-FileShareAccess -FullAccess $FullAccess -ChangeAccess $ChangeAccess -ReadAccess $ReadAccess -NoAccess $NoAccess
-
-            if ($ReferenceAccess)
-            {
-                $ReferenceAccessSplit = $ReferenceAccess | ConvertFrom-FileShareAccess
-
-                if (
-                    (Compare-Object -ReferenceObject $ReferenceAccessSplit.FullAccess -DifferenceObject $TargetResource.FullAccess) -or
-                    (Compare-Object -ReferenceObject $ReferenceAccessSplit.ChangeAccess -DifferenceObject $TargetResource.ChangeAccess) -or 
-                    (Compare-Object -ReferenceObject $ReferenceAccessSplit.ReadAccess -DifferenceObject $TargetResource.ReadAccess) -or
-                    (Compare-Object -ReferenceObject $ReferenceAccessSplit.NoAccess -DifferenceObject $TargetResource.NoAccess)
-                )
-                {
-                    Write-Verbose -Message "Setting file share permissions."
-
-                    Set-FileShareAccess -Name $Name -AccessRuleCollection $ReferenceAccess
-                }
-            }
-            else
-            {
-                Write-Verbose -Message "File share permissions will not be modified."
-            }
-
-            $PSBoundParameters.GetEnumerator() |
-            Where-Object {$_.Key -in (Get-Command -Name Set-FileShare).Parameters.Keys} |
-            ForEach-Object -Begin {$SetParameters = @{}} -Process {$SetParameters.Add($_.Key, $_.Value)}
-
-            if ($SetParameters.Count -ne 0)
-            {
-                Set-FileShare @SetParameters
-            }
+            Remove-cLocalFileShare -Name $Name -Confirm:$false
         }
     }
-}
-
-
-function Test-TargetResource
-{
-    [CmdletBinding()]
-    [OutputType([System.Boolean])]
-    param
-    (
-        [Parameter(Mandatory = $false)]
-        [ValidateSet('Absent', 'Present')]
-        [System.String]
-        $Ensure = 'Present',
-
-        [Parameter(Mandatory = $true)]
-        [ValidateNotNullOrEmpty()]
-        [System.String]
-        $Name,
-
-        [Parameter(Mandatory = $true)]
-        [ValidateScript({Test-Path -Path $_ -PathType Container})]
-        [System.String]
-        $Path,
-
-        [Parameter(Mandatory = $false)]
-        [System.UInt32]
-        $ConcurrentUserLimit,
-
-        [Parameter(Mandatory = $false)]
-        [System.String]
-        $Description,
-
-        [Parameter(Mandatory = $false)]
-        [ValidateNotNullOrEmpty()]
-        [System.String[]]
-        $FullAccess,
-
-        [Parameter(Mandatory = $false)]
-        [ValidateNotNullOrEmpty()]
-        [System.String[]]
-        $ChangeAccess,
-
-        [Parameter(Mandatory = $false)]
-        [ValidateNotNullOrEmpty()]
-        [System.String[]]
-        $ReadAccess,
-
-        [Parameter(Mandatory = $false)]
-        [ValidateNotNullOrEmpty()]
-        [System.String[]]
-        $NoAccess
-    )
-    process
+    elseif ($Ensure -eq 'Present')
     {
-        if ($Path.EndsWith('\'))
+        if ($TargetResource.Ensure -eq 'Absent')
         {
-            $Path = $Path.TrimEnd('\')
+            Write-Verbose -Message  "Creating file share '$Name' with path '$Path'."
+
+            New-cLocalFileShare -Name $Name -Path $Path -ErrorAction Stop
+
+            $TargetResource = Get-TargetResource -Name $Name -Path $Path
         }
 
-        $TargetResource = Get-TargetResource -Name $Name -Path $Path
+        # Compare permissions
+        $ReferenceAccess = ConvertTo-cLocalFileShareAccess -FullAccess $FullAccess -ChangeAccess $ChangeAccess -ReadAccess $ReadAccess -NoAccess $NoAccess
 
-        if ($Ensure -eq 'Absent')
+        if ($ReferenceAccess)
         {
-            if ($TargetResource.Ensure -eq 'Absent')
+            $ReferenceAccessSplit = $ReferenceAccess | ConvertFrom-cLocalFileShareAccess
+
+            if (
+                (Compare-Object -ReferenceObject $ReferenceAccessSplit.FullAccess -DifferenceObject $TargetResource.FullAccess) -or
+                (Compare-Object -ReferenceObject $ReferenceAccessSplit.ChangeAccess -DifferenceObject $TargetResource.ChangeAccess) -or 
+                (Compare-Object -ReferenceObject $ReferenceAccessSplit.ReadAccess -DifferenceObject $TargetResource.ReadAccess) -or
+                (Compare-Object -ReferenceObject $ReferenceAccessSplit.NoAccess -DifferenceObject $TargetResource.NoAccess)
+            )
             {
-                $InDesiredState = $true
+                Write-Verbose -Message "Setting file share permissions."
+
+                Set-cLocalFileShareAccess -Name $Name -AccessRuleCollection $ReferenceAccess
             }
-            else
-            {
-                $InDesiredState = $false
-            }
-        }
-        elseif ($Ensure -eq 'Present')
-        {
-            if ($TargetResource.Ensure -eq 'Absent')
-            {
-                $InDesiredState = $false
-            }
-            else
-            {
-                $InDesiredState = $true
-
-                $PSBoundParameters.Keys.Where({$_ -in @('Name', 'Path', 'ConcurrentUserLimit', 'Description', 'Ensure')}).ForEach(
-                    {
-                        if (Compare-Object -ReferenceObject $PSBoundParameters.Item($_) -DifferenceObject $TargetResource.Item($_))
-                        {
-                            "Property '{0}': Current value: '{1}'; Desired value: '{2}'." -f
-                                $_, ($TargetResource.Item($_) -join ', '), ($PSBoundParameters.Item($_) -join ', ') |
-                            Write-Verbose
-
-                            $InDesiredState = $false
-                        }
-                    }
-                )
-
-                # Normalize and test access-related property values
-                if ($PSBoundParameters.Keys.Where({$_ -in @('FullAccess', 'ChangeAccess', 'ReadAccess', 'NoAccess')}))
-                {
-                    Write-Verbose -Message "Testing access-related property values."
-
-                    $ReferenceAccessSplit = ConvertTo-FileShareAccess -FullAccess $FullAccess -ChangeAccess $ChangeAccess -ReadAccess $ReadAccess -NoAccess $NoAccess |
-                        ConvertFrom-FileShareAccess
-
-                    if (Compare-Object -ReferenceObject $ReferenceAccessSplit.FullAccess -DifferenceObject $TargetResource.FullAccess)
-                    {
-                        "Property '{0}': Current value: '{1}'; Desired value: '{2}'." -f
-                            'FullAccess', ($TargetResource.FullAccess -join ', '), ($ReferenceAccessSplit.FullAccess -join ', ') |
-                        Write-Verbose
-
-                        $InDesiredState = $false
-                    }
-
-                    if (Compare-Object -ReferenceObject $ReferenceAccessSplit.ChangeAccess -DifferenceObject $TargetResource.ChangeAccess)
-                    {
-                        "Property '{0}': Current value: '{1}'; Desired value: '{2}'." -f
-                            'ChangeAccess', ($TargetResource.ChangeAccess -join ', '), ($ReferenceAccessSplit.ChangeAccess -join ', ') |
-                        Write-Verbose
-
-                        $InDesiredState = $false
-                    }
-
-                    if (Compare-Object -ReferenceObject $ReferenceAccessSplit.ReadAccess -DifferenceObject $TargetResource.ReadAccess)
-                    {
-                        "Property '{0}': Current value: '{1}'; Desired value: '{2}'." -f
-                            'ReadAccess', ($TargetResource.ReadAccess -join ', '), ($ReferenceAccessSplit.ReadAccess -join ', ') |
-                        Write-Verbose
-
-                        $InDesiredState = $false
-                    }
-
-                    if (Compare-Object -ReferenceObject $ReferenceAccessSplit.NoAccess -DifferenceObject $TargetResource.NoAccess)
-                    {
-                        "Property '{0}': Current value: '{1}'; Desired value: '{2}'." -f
-                            'NoAccess', ($TargetResource.NoAccess -join ', ') , ($ReferenceAccessSplit.NoAccess -join ', ') |
-                        Write-Verbose
-
-                        $InDesiredState = $false
-                    }
-                }
-            }
-        }
-
-        if ($InDesiredState -eq $true)
-        {
-            Write-Verbose -Message "The target resource is already in the desired state. No action is required."
         }
         else
         {
-            Write-Verbose -Message "The target resource is not in the desired state."
+            Write-Verbose -Message "File share permissions will not be modified."
         }
 
-        return $InDesiredState
+        $PSBoundParameters.GetEnumerator() |
+        Where-Object {$_.Key -in (Get-Command -Name Set-cLocalFileShare).Parameters.Keys} |
+        ForEach-Object -Begin {$SetParameters = @{}} -Process {$SetParameters.Add($_.Key, $_.Value)}
+
+        if ($SetParameters.Count -ne 0)
+        {
+            Set-cLocalFileShare @SetParameters
+        }
     }
+
 }
 
 
@@ -346,7 +343,7 @@ Export-ModuleMember -Function Get-TargetResource, Set-TargetResource, Test-Targe
 
 #region Helper Functions
 
-function Add-cLocalFileShareType
+function Initialize-cLocalFileShareType
 {
 
     $TypeDefinition = @'
@@ -383,27 +380,27 @@ namespace cLocalFileShare
 
     if (-not ('cLocalFileShare.AccessRule' -as [Type]))
     {
-        Add-Type -TypeDefinition $TypeDefinition -Language CSharpVersion3
+        Add-Type -TypeDefinition $TypeDefinition
     }
 
 }
 
-Add-cLocalFileShareType
+Initialize-cLocalFileShareType
 
 
-function New-FileShare
+function New-cLocalFileShare
 {
     [CmdletBinding(ConfirmImpact = 'Medium', SupportsShouldProcess = $true)]
     param
     (
         [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
-        [System.String]
+        [String]
         $Name,
 
         [Parameter(Mandatory = $true)]
         [ValidateScript({Test-Path -Path $_ -PathType Container})]
-        [System.String]
+        [String]
         $Path
     )
     process
@@ -435,14 +432,14 @@ function New-FileShare
 }
 
 
-function Remove-FileShare
+function Remove-cLocalFileShare
 {
     [CmdletBinding(ConfirmImpact = 'High', SupportsShouldProcess = $true)]
     param
     (
         [Parameter(Mandatory = $true, ValueFromPipeline = $true)]
         [ValidateNotNullOrEmpty()]
-        [System.String]
+        [String]
         $Name
     )
     process
@@ -482,22 +479,22 @@ function Remove-FileShare
 }
 
 
-function Set-FileShare
+function Set-cLocalFileShare
 {
     [CmdletBinding(ConfirmImpact = 'Medium', SupportsShouldProcess = $true)]
     param
     (
         [Parameter(Mandatory = $true, ValueFromPipeline = $true)]
         [ValidateNotNullOrEmpty()]
-        [System.String]
+        [String]
         $Name,
 
         [Parameter(Mandatory = $false)]
-        [System.UInt32]
+        [UInt32]
         $ConcurrentUserLimit = 0,
 
         [Parameter(Mandatory = $false)]
-        [System.String]
+        [String]
         $Description = $null
     )
     process
@@ -560,19 +557,19 @@ function Set-FileShare
 }
 
 
-function Get-FileShareAccess
+function Get-cLocalFileShareAccess
 {
     [CmdletBinding()]
     param
     (
         [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
-        [System.String]
+        [String]
         $Name
     )
     begin
     {
-        Add-cLocalFileShareType
+        Initialize-cLocalFileShareType
 
         $OutputEntries = New-Object -TypeName 'System.Collections.ObjectModel.Collection`1[cLocalFileShare.AccessRule]'
     }
@@ -601,24 +598,24 @@ function Get-FileShareAccess
 }
 
 
-function Set-FileShareAccess
+function Set-cLocalFileShareAccess
 {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param
     (
         [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [ValidateNotNullOrEmpty()]
-        [System.String]
+        [String]
         $Name,
 
         [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
-        [System.Object[]]
+        [Object[]]
         $AccessRuleCollection
     )
     begin
     {
-        Add-cLocalFileShareType
+        Initialize-cLocalFileShareType
 
         [cLocalFileShare.AccessRule[]]$AccessRuleCollection = $AccessRuleCollection
     }
@@ -687,13 +684,13 @@ function Set-FileShareAccess
 }
 
 
-function ConvertFrom-FileShareAccess
+function ConvertFrom-cLocalFileShareAccess
 {
     [CmdletBinding()]
     param
     (
         [Parameter(Mandatory = $true, ValueFromPipeline = $true)]
-        [System.Object[]]
+        [Object[]]
         $InputObject
     )
     begin
@@ -734,30 +731,30 @@ function ConvertFrom-FileShareAccess
 }
 
 
-function ConvertTo-FileShareAccess
+function ConvertTo-cLocalFileShareAccess
 {
     [CmdletBinding()]
     param
     (
         [Parameter(Mandatory = $false, ValueFromPipelineByPropertyName = $true)]
-        [System.String[]]
+        [String[]]
         $FullAccess = $null,
 
         [Parameter(Mandatory = $false, ValueFromPipelineByPropertyName = $true)]
-        [System.String[]]
+        [String[]]
         $ChangeAccess = $null,
 
         [Parameter(Mandatory = $false, ValueFromPipelineByPropertyName = $true)]
-        [System.String[]]
+        [String[]]
         $ReadAccess = $null,
 
         [Parameter(Mandatory = $false, ValueFromPipelineByPropertyName = $true)]
-        [System.String[]]
+        [String[]]
         $NoAccess = $null
     )
     begin
     {
-        Add-cLocalFileShareType
+        Initialize-cLocalFileShareType
 
         $InputEntries = New-Object -TypeName 'System.Collections.ObjectModel.Collection`1[cLocalFileShare.AccessRule]'
         $OutputEntries = New-Object -TypeName 'System.Collections.ObjectModel.Collection`1[cLocalFileShare.AccessRule]'
@@ -819,7 +816,7 @@ function Resolve-IdentityReference
     param
     (
         [Parameter(Mandatory = $true, ValueFromPipeline = $true)]
-        [System.String]
+        [String]
         $Identity
     )
     process

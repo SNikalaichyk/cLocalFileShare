@@ -1,6 +1,10 @@
 # cLocalFileShare
 
-The **cLocalFileShare** module contains the **cLocalFileShare** DSC resource that provides a mechanism to manage local file shares. Supports Windows Server 2008 R2 and later.
+The **cLocalFileShare** module contains the **cLocalFileShare** DSC resource that provides a mechanism to manage local file shares.
+
+*Supports Windows Server 2008 R2 and later.*
+
+You can also download this module from the [PowerShell Gallery](https://www.powershellgallery.com/packages/cLocalFileShare/).
 
 ## Resources
 
@@ -18,10 +22,14 @@ The **cLocalFileShare** module contains the **cLocalFileShare** DSC resource tha
 
 ## Versions
 
+### 1.0.1 (October 15, 2015)
+
+* Minor update.
+
 ### 1.0.0 (October 5, 2015)
 
 * Initial release with the following resources:
-  - **cLocalFileShare**
+  - **cLocalFileShare**.
 
 ## Examples
 
